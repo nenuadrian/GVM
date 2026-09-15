@@ -37,23 +37,29 @@ if [[ -n "${GVM_METHOD:-}" ]]; then
             src="$base/global_step_$last/actor"
             ;;
         gvm-grpo|gvm-raftpp)
+            # The EM loop leaves a .gvm_iteration_done marker pointing at each
+            # iteration's merged HF export; take the last one.
             last_iter=$(ls -d "$GVM_ROOT/checkpoints/$GVM_PROJECT/${run_name}-iter"* 2>/dev/null \
                         | sed 's/.*-iter//' | sort -n | tail -1)
             [[ -n "$last_iter" ]] || { echo "no iterations for $run_name" >&2; exit 2; }
-            src="$GVM_ROOT/checkpoints/$GVM_PROJECT/${run_name}-iter${last_iter}/global_step_9/actor"
+            marker="$GVM_ROOT/checkpoints/$GVM_PROJECT/${run_name}-iter${last_iter}/.gvm_iteration_done"
+            [[ -f "$marker" ]] || { echo "iteration $last_iter never finished merging" >&2; exit 2; }
+            src="$(dirname "$(cat "$marker")")"
             ;;
         *) echo "unknown GVM_METHOD '$GVM_METHOD'" >&2; exit 2 ;;
     esac
     GVM_EVAL_NAME="${GVM_EVAL_NAME:-$run_name}"
-    if [[ -f "$src/huggingface/config.json" && -f "$src/huggingface/model.safetensors" ]]; then
+    # verl saves config.json + tokenizer under actor/huggingface on every step but
+    # no weights, so only a *.safetensors there means the merge has happened.
+    if compgen -G "$src/huggingface/*.safetensors" >/dev/null; then
         GVM_EVAL_MODEL="$src/huggingface"
     else
-        GVM_EVAL_MODEL="$src/hf_export"
-        if [[ ! -f "$GVM_EVAL_MODEL/config.json" ]]; then
-            echo "--- merging FSDP shards for evaluation ---"
-            python scripts/legacy_model_merger.py merge --backend fsdp \
-                --hf_model_path "$GVM_MODEL" --local_dir "$src" --target_dir "$GVM_EVAL_MODEL"
-        fi
+        echo "--- merging FSDP shards for evaluation ---"
+        GVM_EVAL_MODEL="$src/huggingface"
+        python scripts/legacy_model_merger.py merge --backend fsdp \
+            --local_dir "$src" --target_dir "$GVM_EVAL_MODEL"
+        compgen -G "$GVM_EVAL_MODEL/*.safetensors" >/dev/null \
+            || { echo "merge produced no weights" >&2; exit 2; }
     fi
 fi
 

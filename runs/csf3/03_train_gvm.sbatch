@@ -52,16 +52,26 @@ export WANDB_RUN_GROUP="gvm"
 export WANDB_RESUME=allow
 export WANDB_RUN_ID="$(echo -n "$GVM_PROJECT/$run_name" | md5sum | cut -c1-16)"
 
+# verl writes <ckpt>/actor/huggingface/{config.json,tokenizer} on every save, with
+# no weights -- only the merge step below puts weights there. So "is this
+# iteration finished" has to test for weights, not for config.json.
+has_weights() { compgen -G "$1/*.safetensors" >/dev/null || [[ -f "$1/pytorch_model.bin" ]]; }
+# The number of steps in an iteration follows from the shard size; don't assume 9.
+last_step_dir() {
+    local base="$1" n
+    n=$(ls -d "$base"/global_step_* 2>/dev/null | sed 's/.*global_step_//' | sort -n | tail -1)
+    [[ -n "$n" ]] && echo "$base/global_step_$n"
+}
+
 echo "=== $run_name on $(hostname) | $(date) ==="
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 
 for (( i=1; i<=GVM_EM_ITERS; i++ )); do
     iter_run="${run_name}-iter${i}"
     ckpt_dir="$GVM_ROOT/checkpoints/$GVM_PROJECT/$iter_run"
-    final_ckpt="$ckpt_dir/global_step_${steps_per_iter}"
-    hf_ckpt="$final_ckpt/actor/huggingface"
 
-    if [[ -f "$hf_ckpt/config.json" ]]; then
+    done_marker="$ckpt_dir/.gvm_iteration_done"
+    if [[ -f "$done_marker" ]] && has_weights "$(cat "$done_marker")"; then
         echo "--- iteration $i already complete, skipping ---"
         continue
     fi
@@ -71,8 +81,10 @@ for (( i=1; i<=GVM_EM_ITERS; i++ )); do
     if (( i == 1 )); then
         policy="$GVM_MODEL"
     else
-        policy="$GVM_ROOT/checkpoints/$GVM_PROJECT/${run_name}-iter$((i-1))/global_step_${steps_per_iter}/actor/huggingface"
-        [[ -f "$policy/config.json" ]] || { echo "missing previous checkpoint: $policy" >&2; exit 3; }
+        prev_marker="$GVM_ROOT/checkpoints/$GVM_PROJECT/${run_name}-iter$((i-1))/.gvm_iteration_done"
+        [[ -f "$prev_marker" ]] || { echo "iteration $((i-1)) never finished" >&2; exit 3; }
+        policy="$(cat "$prev_marker")"
+        has_weights "$policy" || { echo "no weights at $policy" >&2; exit 3; }
     fi
 
     em_dir="$GVM_ROOT/em/data/$model_prefix/$suffix/data_${i}"
@@ -85,7 +97,7 @@ for (( i=1; i<=GVM_EM_ITERS; i++ )); do
         pushd "$GVM_ROOT/em" >/dev/null
 
         # --- E-step part 1: N'=8 pilot rollouts per prompt, sharded over 4 GPUs
-        if [[ ! -f "$em_dir/accept_rates_$((GVM_GPUS-1)).json" ]]; then
+        if [[ ! -f "$em_dir/stage_1_collected_data_$((GVM_GPUS-1)).json" ]]; then
             echo "--- stage 1: pilot sampling (iter $i) ---"
             for (( g=0; g<GVM_GPUS; g++ )); do
                 CUDA_VISIBLE_DEVICES=$g python stage_1_collect_data.py \
@@ -192,7 +204,7 @@ print(sum(len(json.load(open(f'{d}/accept_rates_{k}.json'))) for k in range(w)))
         trainer.n_gpus_per_node="$GVM_GPUS" \
         trainer.nnodes=1 \
         trainer.val_before_train=$([[ $i -eq 1 ]] && echo True || echo False) \
-        trainer.save_freq="$steps_per_iter" \
+        trainer.save_freq="$GVM_SAVE_FREQ" \
         trainer.test_freq="$GVM_TEST_FREQ" \
         trainer.resume_mode=auto \
         trainer.default_local_dir="$ckpt_dir" \
@@ -201,14 +213,17 @@ print(sum(len(json.load(open(f'{d}/accept_rates_{k}.json'))) for k in range(w)))
         2>&1 | tee -a "logs/${iter_run}.log"
 
     # --- Export to HF format so the next E-step can load it with vLLM.
-    echo "--- merging FSDP shards to HF (iter $i) ---"
+    final_ckpt="$(last_step_dir "$ckpt_dir")"
+    [[ -n "$final_ckpt" ]] || { echo "no checkpoint written for iter $i" >&2; exit 5; }
+    hf_ckpt="$final_ckpt/actor/huggingface"
+    echo "--- merging FSDP shards to HF: $final_ckpt ---"
     python scripts/legacy_model_merger.py merge \
         --backend fsdp \
-        --hf_model_path "$GVM_MODEL" \
         --local_dir "$final_ckpt/actor" \
         --target_dir "$hf_ckpt"
 
-    [[ -f "$hf_ckpt/config.json" ]] || { echo "merge failed for iter $i" >&2; exit 5; }
+    has_weights "$hf_ckpt" || { echo "merge produced no weights for iter $i" >&2; exit 5; }
+    echo "$hf_ckpt" > "$done_marker"
 done
 
 echo "TRAIN_OK $run_name"
