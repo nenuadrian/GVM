@@ -18,6 +18,9 @@ mkdir -p "$HF_HOME" "$TRITON_CACHE_DIR" "$TORCHINDUCTOR_CACHE_DIR" "$PIP_CACHE_D
 export VLLM_USE_V1=0
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export TOKENIZERS_PARALLELISM=false
+# Without this, python buffers stdout when piped into tee, so a hang looks
+# identical to a silent process and you learn nothing from the log.
+export PYTHONUNBUFFERED=1
 export NCCL_DEBUG=WARN
 # Single node, no InfiniBand needed between GPUs on one box.
 export NCCL_P2P_DISABLE=0
