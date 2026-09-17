@@ -4,7 +4,8 @@
 #SBATCH --account=gpu-h200-fse-pgdr
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=200G
 #SBATCH --gres=gpu:h200:4
 #SBATCH --time=4-00:00:00
 #SBATCH --open-mode=append
@@ -167,6 +168,7 @@ print(sum(len(json.load(open(f'{d}/accept_rates_{k}.json'))) for k in range(w)))
         data.max_prompt_length="$GVM_MAX_PROMPT_LEN" \
         data.max_response_length="$GVM_MAX_RESP_LEN" \
         data.filter_overlong_prompts=True \
+        data.filter_overlong_prompts_workers=8 \
         data.truncation=error \
         data.shuffle=True \
         actor_rollout_ref.model.path="$policy" \
@@ -209,7 +211,7 @@ print(sum(len(json.load(open(f'{d}/accept_rates_{k}.json'))) for k in range(w)))
         trainer.resume_mode=auto \
         trainer.default_local_dir="$ckpt_dir" \
         trainer.total_epochs=1 \
-        ray_init.num_cpus="${SLURM_CPUS_PER_TASK:-32}" \
+        ray_init.num_cpus="${SLURM_CPUS_PER_TASK:-16}" \
         2>&1 | tee -a "logs/${iter_run}.log"
 
     # --- Export to HF format so the next E-step can load it with vLLM.

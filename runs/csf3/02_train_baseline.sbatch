@@ -4,7 +4,8 @@
 #SBATCH --account=gpu-h200-fse-pgdr
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=200G
 #SBATCH --gres=gpu:h200:4
 #SBATCH --time=4-00:00:00
 #SBATCH --open-mode=append
@@ -33,6 +34,10 @@ esac
 
 run_name="${method}-qwen15"
 ckpt_dir="checkpoints/$GVM_PROJECT/$run_name"
+
+# Hydra needs the key omitted, not set to "", to mean "run a full epoch".
+step_cap=()
+[[ -n "$GVM_BASELINE_STEPS" ]] && step_cap=(trainer.total_training_steps="$GVM_BASELINE_STEPS")
 mkdir -p "$ckpt_dir" logs
 
 export WANDB_PROJECT="$GVM_PROJECT"
@@ -57,6 +62,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_prompt_length="$GVM_MAX_PROMPT_LEN" \
     data.max_response_length="$GVM_MAX_RESP_LEN" \
     data.filter_overlong_prompts=True \
+    data.filter_overlong_prompts_workers=8 \
     data.truncation=error \
     actor_rollout_ref.model.path="$GVM_MODEL" \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -96,7 +102,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.resume_mode=auto \
     trainer.default_local_dir="$ckpt_dir" \
     trainer.total_epochs=1 \
-    ray_init.num_cpus="${SLURM_CPUS_PER_TASK:-32}" \
+    ${step_cap[@]+"${step_cap[@]}"} \
+    ray_init.num_cpus="${SLURM_CPUS_PER_TASK:-16}" \
     2>&1 | tee -a "logs/$run_name.log"
 
 echo "TRAIN_OK $run_name"

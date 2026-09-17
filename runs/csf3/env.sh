@@ -22,9 +22,17 @@ export NCCL_DEBUG=WARN
 # Single node, no InfiniBand needed between GPUs on one box.
 export NCCL_P2P_DISABLE=0
 
-# Ray must not write to $HOME (NAS) or /tmp (small, shared).
-export RAY_TMPDIR="$HOME/scratch/.ray_tmp"
+# Ray's plasma store is an AF_UNIX socket, and the kernel caps that path at 107
+# bytes. Ray appends ~68 bytes of its own (/ray/session_<timestamp>_<pid>/sockets/
+# plasma_store), so RAY_TMPDIR gets ~39. The scratch path alone is 48, hence
+# node-local /tmp -- which is where these sockets belong on a single-node job.
+export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/ray-${SLURM_JOB_ID:-$$}}"
 mkdir -p "$RAY_TMPDIR"
+if (( ${#RAY_TMPDIR} > 39 )); then
+    echo "RAY_TMPDIR is ${#RAY_TMPDIR} chars ('$RAY_TMPDIR'); >39 overflows the" \
+         "107-byte AF_UNIX limit once Ray appends its session path." >&2
+    exit 1
+fi
 
 # Weights & Biases. Key comes from ~/.netrc (machine api.wandb.ai).
 export WANDB_PROJECT="${WANDB_PROJECT:-gvm-replication}"

@@ -24,9 +24,12 @@ def main():
 
     scores = {str(r["dataset"]): float(r["accuracy"]) for _, r in df.iterrows()}
     summary = {f"final/{k}": 100.0 * v for k, v in scores.items()}
-    if "5 average" in df.columns:
+    # aggregate.py averages over whatever rows it has, so a math500-only eval
+    # would report "5 average" == math500. Only pass it on when it means what
+    # the paper's column means.
+    if "5 average" in df.columns and len(scores) == 5:
         summary["final/5_average"] = 100.0 * float(df["5 average"].iloc[0])
-    if "3 average" in df.columns:
+    if "3 average" in df.columns and len(scores) >= 3:
         summary["final/3_average"] = 100.0 * float(df["3 average"].iloc[0])
 
     import wandb

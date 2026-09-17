@@ -1,10 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=gvm-smoke
-#SBATCH --partition=gpuH_short
+#SBATCH --partition=gpuH_short,gpuH
 #SBATCH --account=gpu-h200-fse-pgdr
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=160G
 #SBATCH --gres=gpu:h200:4
 #SBATCH --time=04:00:00
 #SBATCH --output=%x-%j.out
@@ -22,6 +23,12 @@ cd "$GVM_ROOT"
 gvm_activate
 
 export WANDB_PROJECT="${GVM_PROJECT}-smoke"
+
+echo "=== node $(hostname) ==="
+nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+echo "RAY_TMPDIR=$RAY_TMPDIR (${#RAY_TMPDIR} chars)"
+df -h /tmp /dev/shm | sed 's/^/  /'
+
 smoke_rows=256
 smoke_batch=64
 smoke_dir="$GVM_ROOT/data/smoke"
@@ -79,7 +86,7 @@ common=(
     trainer.resume_mode=disable
     trainer.total_epochs=1
     trainer.total_training_steps=2
-    ray_init.num_cpus="${SLURM_CPUS_PER_TASK:-32}"
+    ray_init.num_cpus="${SLURM_CPUS_PER_TASK:-16}"
 )
 
 echo "################ smoke 1/2: GRPO baseline path ################"

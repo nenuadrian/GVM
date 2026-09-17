@@ -16,7 +16,18 @@ cd "$GVM_ROOT"
 mkdir -p logs
 S="runs/csf3"
 
+# GVM_PRESET=small shortens the sweep; the exported vars reach the jobs through
+# sbatch --export=ALL, and config.sh only fills in defaults for what is unset.
+if [[ -n "${GVM_PRESET:-}" ]]; then
+    preset="$GVM_ROOT/$S/preset_${GVM_PRESET}.sh"
+    [[ -f "$preset" ]] || { echo "no such preset: $preset" >&2; exit 2; }
+    source "$preset"
+    echo "preset '$GVM_PRESET': ${GVM_EM_ITERS} EM iterations, baselines capped at" \
+         "${GVM_BASELINE_STEPS} steps, eval on ${GVM_EVAL_DATA}, project ${GVM_PROJECT}"
+fi
+
 only="${1:-all}"
+GVM_MODEL_ID="${GVM_MODEL:-Qwen/Qwen2.5-Math-1.5B}"
 dep=""
 sub() {  # sub <description> <sbatch args...>
     local desc="$1"; shift
@@ -31,7 +42,7 @@ cd logs
 if [[ "$only" == all ]]; then
     sub "prepare data"           "$GVM_ROOT/$S/01_prepare_data.sbatch"
     [[ -n "${GVM_SKIP_SMOKE:-}" ]] || sub "smoke test" "$GVM_ROOT/$S/05_smoke.sbatch"
-    sub "eval base model" --export=ALL,GVM_EVAL_MODEL=Qwen/Qwen2.5-Math-1.5B,GVM_EVAL_NAME=base \
+    sub "eval base model" --export="ALL,GVM_EVAL_MODEL=$GVM_MODEL_ID,GVM_EVAL_NAME=base" \
         "$GVM_ROOT/$S/04_eval.sbatch"
 fi
 

@@ -41,6 +41,16 @@ export GVM_EM_ITERS="${GVM_EM_ITERS:-15}"       # 15 Numina shards x 9 steps = 1
 export GVM_SAVE_FREQ="${GVM_SAVE_FREQ:-5}"
 export GVM_TEST_FREQ="${GVM_TEST_FREQ:-5}"
 
+# Baseline step budget. Empty = one full epoch over the 149,882-prompt split
+# (146 steps), which is what the paper does. Set it to 9 * GVM_EM_ITERS to hold
+# the baselines to the same number of steps as a shortened GVM run, otherwise
+# the comparison is against a baseline that saw more data.
+export GVM_BASELINE_STEPS="${GVM_BASELINE_STEPS:-}"
+
+# Benchmarks for 04_eval.sbatch. All five reproduce Table 1; math500 alone is
+# ~3x quicker and is the headline column.
+export GVM_EVAL_DATA="${GVM_EVAL_DATA:-math500,minerva_math,olympiad_bench,aime24,amc23}"
+
 # Throughput knobs (scheduling only; they do not change the objective).
 export GVM_MAX_BATCHED_TOKENS="${GVM_MAX_BATCHED_TOKENS:-16384}"
 export GVM_MAX_TOKEN_LEN_PER_GPU="${GVM_MAX_TOKEN_LEN_PER_GPU:-32768}"

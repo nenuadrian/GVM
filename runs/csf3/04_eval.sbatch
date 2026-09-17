@@ -4,7 +4,8 @@
 #SBATCH --account=gpu-h200-fse-pgdr
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=160G
 #SBATCH --gres=gpu:h200:4
 #SBATCH --time=08:00:00
 #SBATCH --open-mode=append
