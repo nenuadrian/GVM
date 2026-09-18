@@ -29,6 +29,13 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 echo "RAY_TMPDIR=$RAY_TMPDIR (${#RAY_TMPDIR} chars)"
 df -h /tmp /dev/shm | sed 's/^/  /'
 
+# Per-stage watchdogs. The previous smoke run burned its whole 4h wall clock
+# leaving a 0-byte log; each budget here is well over the expected runtime, so
+# tripping one means a real hang -- and ABRT + PYTHONFAULTHANDLER make it say where.
+guard() { timeout -k 30 -s ABRT "$@"; }
+T_TRAIN="${GVM_SMOKE_T_TRAIN:-2400}"
+T_STAGE="${GVM_SMOKE_T_STAGE:-1800}"
+
 smoke_rows=256
 smoke_batch=64
 smoke_dir="$GVM_ROOT/data/smoke"
@@ -90,7 +97,7 @@ common=(
 )
 
 echo "################ smoke 1/2: GRPO baseline path ################"
-python3 -m verl.trainer.main_ppo "${common[@]}" \
+guard "$T_TRAIN" python3 -m verl.trainer.main_ppo "${common[@]}" \
     algorithm.adv_estimator=grpo \
     actor_rollout_ref.actor.policy_loss=plusplus \
     actor_rollout_ref.rollout.n=4 \
@@ -106,7 +113,7 @@ mkdir -p "$em_dir"
 
 pushd "$GVM_ROOT/em" >/dev/null
 for (( g=0; g<GVM_GPUS; g++ )); do
-    CUDA_VISIBLE_DEVICES=$g python stage_1_collect_data.py \
+    CUDA_VISIBLE_DEVICES=$g guard "$T_STAGE" python stage_1_collect_data.py \
         --local_index "$g" --world_size "$GVM_GPUS" \
         --model_name_or_path "$GVM_MODEL" --iter 1 \
         --data_path "ScaleML-RLHF/numina_math_1" --end "$smoke_rows" \
@@ -116,14 +123,14 @@ for (( g=0; g<GVM_GPUS; g++ )); do
 done
 wait
 for (( g=0; g<GVM_GPUS; g++ )); do
-    CUDA_VISIBLE_DEVICES=$g python stage_2_calc_acceptRates_grads.py \
+    CUDA_VISIBLE_DEVICES=$g guard "$T_STAGE" python stage_2_calc_acceptRates_grads.py \
         --local_index "$g" --num_collect_files "$GVM_GPUS" \
         --model_name_or_path "$GVM_MODEL" --iter 1 --act_params embed_tokens \
         --model_prefix "$model_prefix" --suffix "$suffix" \
         --stage_1_samples "$GVM_STAGE1_SAMPLES" --system_prompt qwen25-math-cot &
 done
 wait
-python stage_2_calc_sample_size.py \
+guard "$T_STAGE" python stage_2_calc_sample_size.py \
     --num_collect_files "$GVM_GPUS" --iter 1 \
     --model_prefix "$model_prefix" --suffix "$suffix" \
     --stage_1_samples "$GVM_STAGE1_SAMPLES" \
@@ -141,7 +148,7 @@ assert len(s) == n, f"sample_sizes has {len(s)} entries, expected {n} (index ali
 print(f"sample sizes: n={len(s)} total={sum(s)} max={max(s)} zeros={sum(1 for x in s if x == 0)}")
 PY
 
-python3 -m verl.trainer.main_ppo "${common[@]}" \
+guard "$T_TRAIN" python3 -m verl.trainer.main_ppo "${common[@]}" \
     algorithm.adv_estimator=raft \
     actor_rollout_ref.actor.policy_loss=plusplus \
     actor_rollout_ref.actor.clip_ratio_low="$GVM_CLIP_LOW" \
