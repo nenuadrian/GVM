@@ -78,8 +78,8 @@ run_method() {
         gvm-grpo|gvm-raftpp)  script="03_train_gvm.sbatch" ;;
         *) echo "unknown method '$m'" >&2; exit 2 ;;
     esac
-    sub "train $m"  "${place[@]}" --export="ALL,GVM_METHOD=$m" "$GVM_ROOT/$S/$script"
-    sub "eval $m"   "${place[@]}" --export="ALL,GVM_METHOD=$m" "$GVM_ROOT/$S/04_eval.sbatch"
+    sub "train $m"  "${place[@]}" --job-name="t-$m" --export="ALL,GVM_METHOD=$m" "$GVM_ROOT/$S/$script"
+    sub "eval $m"   "${place[@]}" --job-name="e-$m" --export="ALL,GVM_METHOD=$m" "$GVM_ROOT/$S/04_eval.sbatch"
 }
 
 if [[ "$only" == all ]]; then

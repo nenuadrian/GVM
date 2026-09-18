@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=gvm-em
+#SBATCH --job-name=gvmem
 #SBATCH --partition=gpuH
 #SBATCH --account=gpu-h200-fse-pgdr
 #SBATCH --nodes=1
