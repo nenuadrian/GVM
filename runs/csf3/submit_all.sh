@@ -85,7 +85,10 @@ run_method() {
 if [[ "$only" == all ]]; then
     for m in grpo raftpp gvm-grpo gvm-raftpp; do run_method "$m"; done
 else
-    run_method "$only"
+    # Several methods chain into one afterok sequence on this target. Keep a
+    # method and its GVM counterpart on the same target: comparing GRPO on H200
+    # against GVM-GRPO on L40S would confound the result with the hardware.
+    for m in "$@"; do run_method "$m"; done
 fi
 
 echo
