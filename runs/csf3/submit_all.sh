@@ -46,17 +46,21 @@ place=(--partition="$GVM_SB_PARTITION" --account="$GVM_SB_ACCOUNT"
 
 dep=""
 n_dry=0
-sub() {  # sub <description> <sbatch args...>
-    local desc="$1"; shift
+# Dependency kind matters. An eval genuinely needs its training job's checkpoint,
+# so afterok. A training job needs nothing from what ran before it -- every method
+# starts from the base model -- and is chained only because the QOS cap stops two
+# 4-GPU jobs overlapping. Using afterok there would let one failed 8-minute eval
+# strand a 10-hour training run as DependencyNeverSatisfied.
+sub() {  # sub <afterok|afterany> <description> <sbatch args...>
+    local kind="$1" desc="$2"; shift 2
     if [[ -n "${GVM_DRY_RUN:-}" ]]; then
         n_dry=$((n_dry + 1))
-        printf '%-34s sbatch %s%s\n' "$desc" \
-            "${dep:+--dependency=afterok:$dep }" "$*"
+        printf '%-34s sbatch %s%s\n' "$desc" "${dep:+--dependency=$kind:$dep }" "$*"
         dep="dry$n_dry"
         return 0
     fi
     local out
-    out=$(sbatch --parsable ${dep:+--dependency=afterok:$dep} "$@")
+    out=$(sbatch --parsable ${dep:+--dependency=$kind:$dep} "$@")
     dep="${out%%;*}"
     printf '%-34s job %s\n' "$desc" "$dep"
 }
@@ -64,9 +68,9 @@ sub() {  # sub <description> <sbatch args...>
 cd logs
 
 if [[ "$only" == all ]]; then
-    sub "prepare data"           "$GVM_ROOT/$S/01_prepare_data.sbatch"
-    [[ -n "${GVM_SKIP_SMOKE:-}" ]] || sub "smoke test" "${place[@]}" "$GVM_ROOT/$S/05_smoke.sbatch"
-    sub "eval base model" "${place[@]}" \
+    sub afterany "prepare data"  "$GVM_ROOT/$S/01_prepare_data.sbatch"
+    [[ -n "${GVM_SKIP_SMOKE:-}" ]] || sub afterok "smoke test" "${place[@]}" "$GVM_ROOT/$S/05_smoke.sbatch"
+    sub afterok "eval base model" "${place[@]}" \
         --export="ALL,GVM_EVAL_MODEL=$GVM_MODEL_ID,GVM_EVAL_NAME=base" \
         "$GVM_ROOT/$S/04_eval.sbatch"
 fi
@@ -78,8 +82,8 @@ run_method() {
         gvm-grpo|gvm-raftpp)  script="03_train_gvm.sbatch" ;;
         *) echo "unknown method '$m'" >&2; exit 2 ;;
     esac
-    sub "train $m"  "${place[@]}" --job-name="t-$m" --export="ALL,GVM_METHOD=$m" "$GVM_ROOT/$S/$script"
-    sub "eval $m"   "${place[@]}" --job-name="e-$m" --export="ALL,GVM_METHOD=$m" "$GVM_ROOT/$S/04_eval.sbatch"
+    sub afterany "train $m"  "${place[@]}" --job-name="t-$m" --export="ALL,GVM_METHOD=$m" "$GVM_ROOT/$S/$script"
+    sub afterok  "eval $m"   "${place[@]}" --job-name="e-$m" --export="ALL,GVM_METHOD=$m" "$GVM_ROOT/$S/04_eval.sbatch"
 }
 
 if [[ "$only" == all ]]; then
