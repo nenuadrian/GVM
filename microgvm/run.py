@@ -186,6 +186,12 @@ def main():
     allocs = {
         "uniform": uniform_alloc(m, C),
         "gvm":     gvm_alloc(gt["p"], gt["G"], C),
+        # Direct test of whether G_i earns its cost. gvm_logit matched gvm_pilot
+        # (0.57x vs 0.58x) even though corr(G_logit, G_true) was ~0 on the ladder,
+        # which suggests the allocation is driven by p_i alone. If this arm also
+        # matches, GVM's entire stage-2 gradient pass can be deleted rather than
+        # made cheaper.
+        "gvm_p_only": gvm_alloc(p_pilot, np.ones(m), C),
         "gvm_pilot": gvm_alloc(p_pilot, G_pilot, C),
         "gvm_logit": gvm_alloc(p_pilot, G_logit, C),
         "vip":     vip_alloc(np.clip(gp.predict(range(m)), 1e-3, 1 - 1e-3), C, lo=3, hi=C),
@@ -201,7 +207,7 @@ def main():
     }
     # gvm_logit reuses the same pilot rollouts as gvm but needs no backward pass,
     # so its rollout cost is identical and its compute cost is far lower.
-    pilot_cost = {"uniform": 0, "gvm": args.pilot * m, "gvm_pilot": args.pilot * m,
+    pilot_cost = {"uniform": 0, "gvm": args.pilot * m, "gvm_pilot": args.pilot * m, "gvm_p_only": args.pilot * m,
                   "gvm_logit": args.pilot * m,
                   "vip": 0, "vip_logit": 0, "neyman": args.gt_rollouts * m}
 
