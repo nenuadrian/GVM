@@ -57,7 +57,10 @@ if [[ -n "${GVM_METHOD:-}" ]]; then
     else
         echo "--- merging FSDP shards for evaluation ---"
         GVM_EVAL_MODEL="$src/huggingface"
+        # See 03_train_gvm.sbatch: --hf_model_path is required despite the
+        # deprecation notice, because actor/huggingface/ is written empty.
         python scripts/legacy_model_merger.py merge --backend fsdp \
+            --hf_model_path "$GVM_MODEL" \
             --local_dir "$src" --target_dir "$GVM_EVAL_MODEL"
         compgen -G "$GVM_EVAL_MODEL/*.safetensors" >/dev/null \
             || { echo "merge produced no weights" >&2; exit 2; }

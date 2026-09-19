@@ -219,8 +219,12 @@ print(sum(len(json.load(open(f'{d}/accept_rates_{k}.json'))) for k in range(w)))
     [[ -n "$final_ckpt" ]] || { echo "no checkpoint written for iter $i" >&2; exit 5; }
     hf_ckpt="$final_ckpt/actor/huggingface"
     echo "--- merging FSDP shards to HF: $final_ckpt ---"
+    # --hf_model_path is labelled deprecated, but this verl fork does not write
+    # config.json into actor/huggingface/, so without it the merger has nothing
+    # to read and dies with "Unrecognized model".
     python scripts/legacy_model_merger.py merge \
         --backend fsdp \
+        --hf_model_path "$GVM_MODEL" \
         --local_dir "$final_ckpt/actor" \
         --target_dir "$hf_ckpt"
 

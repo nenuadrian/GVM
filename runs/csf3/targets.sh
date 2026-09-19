@@ -29,6 +29,10 @@ gvm_target() {
             # No NVLink: keep the reference policy off-GPU rather than paying for
             # extra PCIe traffic during the log-prob pass.
             : "${GVM_MAX_BATCHED_TOKENS:=8192}"
+            # 48GB, not 140. t-raftpp OOMed here trying to allocate 8.92 GiB in
+            # backward with the H200-sized 32768; halve the training micro-batch
+            # token budget. This changes micro-batch packing only, not the loss.
+            : "${GVM_MAX_TOKEN_LEN_PER_GPU:=12288}"
             ;;
         a100)
             GVM_SB_PARTITION=gpuA
@@ -41,6 +45,7 @@ gvm_target() {
     esac
     export GVM_SB_PARTITION GVM_SB_ACCOUNT GVM_SB_GRES GVM_SB_MEM
     export GVM_GPU_MEM_UTIL
+    [[ -n "${GVM_MAX_TOKEN_LEN_PER_GPU:-}" ]] && export GVM_MAX_TOKEN_LEN_PER_GPU
     [[ -n "${GVM_MAX_BATCHED_TOKENS:-}" ]] && export GVM_MAX_BATCHED_TOKENS
     return 0
 }
