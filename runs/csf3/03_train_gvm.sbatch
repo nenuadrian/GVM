@@ -42,9 +42,12 @@ case "$method" in
     *) echo "GVM_METHOD must be gvm-grpo or gvm-raftpp, got '$method'" >&2; exit 2 ;;
 esac
 
-run_name="${method}-qwen15"
+# A suffix keeps ablation arms from colliding: run_name drives the checkpoint
+# directory, the EM data directory AND the wandb run id, so two arms of the same
+# method would otherwise overwrite each other.
+run_name="${method}-qwen15${GVM_RUN_SUFFIX:-}"
 model_prefix="$(basename "$GVM_MODEL")"
-suffix="${method}_n${GVM_STAGE1_SAMPLES}_a${GVM_ALPHA}_b${GVM_BETA}"
+suffix="${method}${GVM_RUN_SUFFIX:-}_n${GVM_STAGE1_SAMPLES}_a${GVM_ALPHA}_b${GVM_BETA}"
 steps_per_iter=9
 
 export WANDB_PROJECT="$GVM_PROJECT"
@@ -66,6 +69,12 @@ last_step_dir() {
 
 echo "=== $run_name on $(hostname) | $(date) ==="
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+# Print the memory-shaping knobs. These come from targets.sh via --export=ALL and
+# silently fall back to H200-sized defaults if submit_all.sh was bypassed, which
+# is exactly how two L40S runs OOMed.
+echo "mem settings: gpu_memory_utilization=$GVM_GPU_MEM_UTIL"\
+     " ppo_max_token_len_per_gpu=$GVM_MAX_TOKEN_LEN_PER_GPU"\
+     " max_num_batched_tokens=$GVM_MAX_BATCHED_TOKENS"
 
 for (( i=1; i<=GVM_EM_ITERS; i++ )); do
     iter_run="${run_name}-iter${i}"
@@ -162,6 +171,7 @@ print(sum(len(json.load(open(f'{d}/accept_rates_{k}.json'))) for k in range(w)))
     python3 -m verl.trainer.main_ppo \
         algorithm.adv_estimator="$adv" \
         algorithm.kl_ctrl.kl_coef="$GVM_KL_COEF" \
+        +algorithm.gvm_reweight="$GVM_REWEIGHT" \
         data.train_files="['data/numina_math_${i}/train.parquet']" \
         data.val_files="['data/math500/test.parquet']" \
         data.train_batch_size="$GVM_TRAIN_BATCH" \

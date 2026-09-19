@@ -52,6 +52,12 @@ export WANDB_RUN_ID="$(echo -n "$GVM_PROJECT/$run_name" | md5sum | cut -c1-16)"
 
 echo "=== $run_name on $(hostname) | $(date) ==="
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+# Print the memory-shaping knobs. These come from targets.sh via --export=ALL and
+# silently fall back to H200-sized defaults if submit_all.sh was bypassed, which
+# is exactly how two L40S runs OOMed.
+echo "mem settings: gpu_memory_utilization=$GVM_GPU_MEM_UTIL"\
+     " ppo_max_token_len_per_gpu=$GVM_MAX_TOKEN_LEN_PER_GPU"\
+     " max_num_batched_tokens=$GVM_MAX_BATCHED_TOKENS"
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator="$adv" \

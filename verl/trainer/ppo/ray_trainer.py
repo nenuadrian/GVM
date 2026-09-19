@@ -187,6 +187,72 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def compute_gvm_reweight(data: DataProto, mode="auto", adv_estimator=None):
+    """Per-prompt weights restoring GVM's intended estimator.
+
+    GVM Lemma 1 / Algorithm 1 line 8 weight each prompt so it contributes one
+    unit regardless of how large a rollout budget it received. verl instead
+    aggregates with loss_agg_mode=token-mean, under which a prompt's weight grows
+    with n_i and with its response lengths -- exactly the prompts GVM oversamples.
+
+    Which weight restores "one unit per prompt" depends on the advantage:
+
+      inv_np  w = 1/(n_i p_i).  For RAFT, rejected rollouts carry advantage 0 and
+              contribute nothing, so the sum runs over the ~n_i p_i accepted ones
+              and the total is 1. This is Lemma 1 verbatim.
+      inv_n   w = 1/n_i.  For GRPO the advantages are mean-centred, so every
+              rollout contributes; dividing by the group size is what makes each
+              prompt count once. Using inv_np here would leave a residual 1/p_i
+              tilt toward hard prompts -- part of the very effect we are testing.
+
+      auto    inv_np for raft, inv_n for grpo.
+
+    Weights are rescaled to preserve the token-weighted total, so switching this
+    on does not also change the effective learning rate.
+    """
+    if mode == "auto":
+        mode = "inv_np" if str(adv_estimator) == "raft" else "inv_n"
+    assert mode in ("inv_np", "inv_n"), f"unknown gvm_reweight mode {mode}"
+
+    uid = data.non_tensor_batch["uid"]
+    scores = data.batch["token_level_scores"].sum(dim=-1)
+    tokens = data.batch["response_mask"].sum(dim=-1).to(scores.dtype)
+
+    groups = defaultdict(list)
+    for row, key in enumerate(uid):
+        groups[key].append(row)
+
+    w = torch.ones_like(scores)
+    degenerate = 0
+    for rows in groups.values():
+        idx = torch.tensor(rows, device=scores.device, dtype=torch.long)
+        n_i = float(len(rows))
+        if mode == "inv_n":
+            w[idx] = 1.0 / n_i
+            continue
+        p_i = float(scores[idx].gt(0).to(scores.dtype).mean().item())
+        if p_i <= 0.0:
+            # No accepted rollout: the group's advantages are all zero anyway, so
+            # leave the weight at 1 instead of dividing by zero.
+            degenerate += 1
+            continue
+        w[idx] = 1.0 / (n_i * p_i)
+
+    mass = (w * tokens).sum()
+    if mass > 0:
+        w = w * (tokens.sum() / mass)
+
+    metrics = {
+        "gvm_reweight/mode_inv_np": float(mode == "inv_np"),
+        "gvm_reweight/weight_min": w.min().item(),
+        "gvm_reweight/weight_max": w.max().item(),
+        "gvm_reweight/weight_ratio_max_min": (w.max() / w.min().clamp(min=1e-12)).item(),
+        "gvm_reweight/groups": float(len(groups)),
+        "gvm_reweight/groups_degenerate": float(degenerate),
+    }
+    return w.unsqueeze(-1), metrics
+
+
 def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, norm_adv_by_std_in_grpo=True):
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch:
@@ -1133,6 +1199,24 @@ class RayPPOTrainer:
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                         )
+
+                        # GVM Lemma 1 / Algorithm 1 line 8 weight the gradient by
+                        # 1/(n_i p_i), which makes every prompt count equally and
+                        # is what makes the estimator unbiased. verl instead
+                        # aggregates with loss_agg_mode=token-mean, so a prompt's
+                        # weight grows with n_i and with its response lengths --
+                        # precisely the prompts GVM oversamples. The actor only
+                        # ever receives `advantages` (see dp_actor select_keys),
+                        # so that is the only channel the weight can travel; apply
+                        # it here, in the driver, where the group ids still exist.
+                        gvm_rw = str(self.config.algorithm.get("gvm_reweight", "off"))
+                        if gvm_rw not in ("off", "False", "false", "None"):
+                            adv_w, w_metrics = compute_gvm_reweight(
+                                batch, mode=gvm_rw,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                            )
+                            batch.batch["advantages"] = batch.batch["advantages"] * adv_w
+                            metrics.update(w_metrics)
 
                     # update critic
                     if self.use_critic:

@@ -56,4 +56,10 @@ export GVM_MAX_BATCHED_TOKENS="${GVM_MAX_BATCHED_TOKENS:-16384}"
 export GVM_MAX_TOKEN_LEN_PER_GPU="${GVM_MAX_TOKEN_LEN_PER_GPU:-32768}"
 export GVM_GPU_MEM_UTIL="${GVM_GPU_MEM_UTIL:-0.75}"
 
+# Restore GVM's intended gradient estimator. "off" reproduces the released code,
+# under which a prompt's weight grows with the budget GVM gave it. "auto" applies
+# 1/(n_i p_i) for RAFT and 1/n_i for GRPO, making every prompt count once, as
+# Lemma 1 / Algorithm 1 line 8 specify. See compute_gvm_reweight in ray_trainer.
+export GVM_REWEIGHT="${GVM_REWEIGHT:-off}"
+
 export GVM_PROJECT="${GVM_PROJECT:-gvm-qwen15-math500}"

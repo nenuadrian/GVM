@@ -25,7 +25,9 @@ gvm_target() {
             GVM_SB_ACCOUNT=gpu-free
             GVM_SB_GRES="gpu:l40s:${GVM_GPUS:-4}"
             GVM_SB_MEM=160G
-            : "${GVM_GPU_MEM_UTIL:=0.70}"
+            # 0.75 then 0.70 both OOMed in backward with 41.6/44.4 GiB in use;
+            # give vLLM less so more survives the handover to training.
+            : "${GVM_GPU_MEM_UTIL:=0.60}"
             # No NVLink: keep the reference policy off-GPU rather than paying for
             # extra PCIe traffic during the log-prob pass.
             : "${GVM_MAX_BATCHED_TOKENS:=8192}"
