@@ -189,13 +189,21 @@ def main():
         "gvm_pilot": gvm_alloc(p_pilot, G_pilot, C),
         "gvm_logit": gvm_alloc(p_pilot, G_logit, C),
         "vip":     vip_alloc(np.clip(gp.predict(range(m)), 1e-3, 1 - 1e-3), C, lo=3, hi=C),
+        # VIP's objective is a_q = 4 sigma_Z_q^2 p(1-p), but the paper does not say
+        # how sigma_Z_q is obtained cheaply, so plain `vip` above leaves it constant
+        # and is driven purely by p(1-p). The Fisher identity supplies exactly that
+        # missing term from the forward pass. This arm needs NO pilot rollouts (p is
+        # predicted) and NO backward pass (sigma is computed) -- the cheapest E-step
+        # of any arm here.
+        "vip_logit": vip_alloc(np.clip(gp.predict(range(m)), 1e-3, 1 - 1e-3), C,
+                               lo=3, hi=C, sigma=np.maximum(G_logit, 1e-9)),
         "neyman": neyman_alloc(gt["sigma"], C),
     }
     # gvm_logit reuses the same pilot rollouts as gvm but needs no backward pass,
     # so its rollout cost is identical and its compute cost is far lower.
     pilot_cost = {"uniform": 0, "gvm": args.pilot * m, "gvm_pilot": args.pilot * m,
                   "gvm_logit": args.pilot * m,
-                  "vip": 0, "neyman": args.gt_rollouts * m}
+                  "vip": 0, "vip_logit": 0, "neyman": args.gt_rollouts * m}
 
     results = {}
     gen = torch.Generator().manual_seed(args.seed + 999)
