@@ -19,6 +19,30 @@ def flat_grad(model, loss, retain=False):
     return torch.cat(parts)
 
 
+def prompt_contribution(model, task, idx, n_rollouts, temperature=1.0, generator=None):
+    """Summed gradient contribution for one prompt, in a SINGLE backward pass.
+
+    sum_j a_j * grad log p(y_j) == grad [ sum_j a_j * log p(y_j) ] because the
+    advantages a_j are constants. Forming the sum inside the graph turns n_i
+    backward passes into one, which is ~8x for a typical allocation and changes
+    nothing about the result.
+
+    Only used where the SUM is wanted. Estimating per-prompt noise sigma_i needs
+    the individual gradients, so ground_truth() still pays the per-rollout cost.
+    """
+    x, _ = task.batch([idx])
+    k = len(task.targets[idx])
+    prompt = torch.tensor(x).repeat(n_rollouts, 1)
+    comp = model.sample(prompt, n_new=k, temperature=temperature, generator=generator)
+    rewards = task.reward([idx] * n_rollouts, comp.numpy())
+    adv = torch.tensor(rewards - rewards.mean(), dtype=torch.float32)
+    lp = model.logprobs(prompt, comp).sum(dim=1)          # (n,)
+    surrogate = (adv * lp).sum()
+    g = flat_grad(model, surrogate).detach()
+    model.zero_grad(set_to_none=True)
+    return g, rewards
+
+
 def prompt_gradients(model, task, idx, n_rollouts, temperature=1.0, generator=None):
     """Per-rollout gradient contributions for one prompt.
 

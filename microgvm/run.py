@@ -18,7 +18,8 @@ import torch.nn.functional as F
 
 from task import ModChainTask
 from model import TinyLM
-from measure import ground_truth, prompt_gradients, flat_grad, estimator_error
+from measure import (ground_truth, prompt_gradients, prompt_contribution,
+                     flat_grad, estimator_error)
 from allocators import (uniform_alloc, gvm_alloc, vip_alloc, neyman_alloc,
                         PromptSuccessGP, alloc_stats)
 
@@ -57,9 +58,8 @@ def draw(model, task, idx_set, n_alloc, temperature, gen):
     for i, n_i in zip(idx_set, n_alloc):
         if n_i <= 0:
             sums.append(None); continue
-        g, r = prompt_gradients(model, task, i, int(n_i), temperature, gen)
-        adv = torch.tensor(r - r.mean(), dtype=g.dtype)
-        sums.append((g * adv[:, None]).sum(0))
+        g, _ = prompt_contribution(model, task, i, int(n_i), temperature, gen)
+        sums.append(g)
     return sums
 
 
