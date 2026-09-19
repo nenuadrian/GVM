@@ -13,15 +13,16 @@ for f in sorted(glob.glob(args.pattern)):
     base = d["uniform|per_prompt"]["mse"]
     rows.append(dict(name=f.split("/")[-1].replace(".json", ""),
                      p_mean=meta["p_mean"], p_spread=meta["p_spread"],
+                     p_deg=meta.get("p_frac_degenerate", float("nan")),
                      **{k: v["mse"] / base for k, v in d.items()}))
 if not rows:
     raise SystemExit(f"no results matching {args.pattern}")
 
 keys = [k for k in rows[0] if "|" in k]
 rows.sort(key=lambda r: r["p_mean"])
-print(f"{'run':>24} {'p_mean':>7} {'p_sprd':>7} | " + " ".join(f"{k.split('|')[0][:6]:>7}/{k.split('|')[1][:4]:<4}" for k in keys))
+print(f"{'run':>24} {'p_mean':>7} {'p_sprd':>7} {'p_deg':>6} | " + " ".join(f"{k.split('|')[0][:6]:>7}/{k.split('|')[1][:4]:<4}" for k in keys))
 for r in rows:
-    print(f"{r['name']:>24} {r['p_mean']:>7.3f} {r['p_spread']:>7.3f} | " +
+    print(f"{r['name']:>24} {r['p_mean']:>7.3f} {r['p_spread']:>7.3f} {r['p_deg']:>6.2f} | " +
           " ".join(f"{r[k]:>12.2f}" for k in keys))
 
 print("\n=== mean over runs (MSE vs uniform|per_prompt; <1 better) ===")

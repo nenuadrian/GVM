@@ -16,7 +16,7 @@ export MKL_NUM_THREADS="$OMP_NUM_THREADS"
 mkdir -p results
 
 # "modulus:max_k:warmup", easiest first
-CONFIGS=${CONFIGS:-"5:2:1500 5:3:1500 7:2:1500 7:3:3000 7:4:1500 11:4:1500"}
+CONFIGS=${CONFIGS:-"7:4:1500 11:4:1500 5:4:3000 5:2:400 7:2:1500 5:3:1500"}
 
 for seed in ${SEEDS:-0 1}; do
   for cfg in $CONFIGS; do

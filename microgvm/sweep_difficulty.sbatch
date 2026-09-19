@@ -34,7 +34,7 @@ export WANDB_CACHE_DIR="$HOME/scratch/.cache/wandb"
 mkdir -p "$WANDB_DIR" "$WANDB_CACHE_DIR" results
 
 # modulus:max_k:warmup, easiest first
-CONFIGS=(5:2:1500 5:3:1500 7:2:1500 7:3:3000 7:4:1500 11:4:1500)
+CONFIGS=(7:4:1500 11:4:1500 5:4:3000 5:2:400 7:2:1500 5:3:1500)   # p ~ .15 .24 .38 .42 .54 .73
 SEEDS=(0 1 2 3)
 
 i="${SLURM_ARRAY_TASK_ID:-0}"

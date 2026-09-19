@@ -196,7 +196,12 @@ def main():
         wandb.finish()
     if args.out:
         payload = {k: v for k, v in results.items()}
-        payload["_meta"] = dict(p_mean=float(gt["p"].mean()), p_spread=float(gt["p"].std()),
+        pp = gt["p"]
+        payload["_meta"] = dict(p_mean=float(pp.mean()), p_spread=float(pp.std()),
+                                # p=0 or p=1 means every advantage in that group is
+                                # zero under mean-centring, so the prompt contributes
+                                # nothing no matter how it is allocated.
+                                p_frac_degenerate=float(((pp <= 0) | (pp >= 1)).mean()),
                                 config=vars(args),
                                 alloc={k: np.asarray(v).tolist() for k, v in allocs.items()})
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
