@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from task import ModChainTask
 from model import TinyLM
 from measure import (ground_truth, prompt_gradients, prompt_contribution,
-                     flat_grad, estimator_error)
+                     flat_grad, estimator_error, logit_grad_scale)
 from allocators import (uniform_alloc, gvm_alloc, vip_alloc, neyman_alloc,
                         PromptSuccessGP, alloc_stats)
 
@@ -148,13 +148,54 @@ def main():
     for _ in range(8):                       # let the GP see a few rounds first
         gp.update(range(m), gt["p"])
 
+    # G_i from the forward pass instead of a backward pass per accepted rollout.
+    # Uses the same N' pilot rollouts GVM already draws for p_i, so the saving is
+    # GVM's entire stage-2 gradient pass.
+    # Both G estimates must come from the SAME pilot budget or the comparison is
+    # rigged: gt["G"] uses --gt-rollouts (hundreds), whereas the real method gets
+    # N' = --pilot. `gvm` below keeps the privileged estimate as an upper bound,
+    # `gvm_pilot` is what the method actually has, and `gvm_logit` is the forward-
+    # pass alternative on the same budget. gvm_pilot vs gvm_logit is the fair test.
+    log(f"computing pilot-budget G estimates (N'={args.pilot})...")
+    t0 = time.time()
+    G_logit, collisions, G_pilot, p_pilot = [], [], [], []
+    gen_l = torch.Generator().manual_seed(args.seed + 4242)
+    gen_s = torch.Generator().manual_seed(args.seed + 4242)   # same stream -> same rollouts
+    for i in idx_set:
+        g, _, coll = logit_grad_scale(model, task, i, args.pilot, args.temperature, gen_l)
+        G_logit.append(g); collisions.append(coll)
+        gr, rr = prompt_gradients(model, task, i, args.pilot, args.temperature, gen_s)
+        acc = gr[torch.tensor(rr > 0)]
+        G_pilot.append(float(acc.norm(dim=1).mean().item()) if len(acc) else 0.0)
+        p_pilot.append(float(rr.mean()))
+    G_logit = np.asarray(G_logit); collisions = np.asarray(collisions)
+    G_pilot = np.asarray(G_pilot); p_pilot = np.asarray(p_pilot)
+    # If 1-collision pins near 1 for every prompt the signal is flat and the idea
+    # fails; report it rather than let a null result look like a negative one.
+    sat = 1.0 - collisions
+    nz = G_logit[G_logit > 0]
+    def _corr(a, b):
+        return (float(np.corrcoef(a, b)[0, 1])
+                if a.std() > 1e-9 and b.std() > 1e-9 else float("nan"))
+    corr = _corr(G_logit, gt["G"])
+    log(f"  done in {time.time()-t0:.1f}s | 1-||q||^2 mean {sat.mean():.4f} "
+        f"spread {sat.std():.4f}")
+    log(f"  corr(G_logit, G_true)={corr:+.3f}  corr(G_pilot, G_true)={_corr(G_pilot, gt['G']):+.3f}"
+        f"  | zero-G prompts: logit {(G_logit<=0).sum()}/{m} pilot {(G_pilot<=0).sum()}/{m}")
+
     allocs = {
         "uniform": uniform_alloc(m, C),
         "gvm":     gvm_alloc(gt["p"], gt["G"], C),
+        "gvm_pilot": gvm_alloc(p_pilot, G_pilot, C),
+        "gvm_logit": gvm_alloc(p_pilot, G_logit, C),
         "vip":     vip_alloc(np.clip(gp.predict(range(m)), 1e-3, 1 - 1e-3), C, lo=3, hi=C),
         "neyman": neyman_alloc(gt["sigma"], C),
     }
-    pilot_cost = {"uniform": 0, "gvm": args.pilot * m, "vip": 0, "neyman": args.gt_rollouts * m}
+    # gvm_logit reuses the same pilot rollouts as gvm but needs no backward pass,
+    # so its rollout cost is identical and its compute cost is far lower.
+    pilot_cost = {"uniform": 0, "gvm": args.pilot * m, "gvm_pilot": args.pilot * m,
+                  "gvm_logit": args.pilot * m,
+                  "vip": 0, "neyman": args.gt_rollouts * m}
 
     results = {}
     gen = torch.Generator().manual_seed(args.seed + 999)
@@ -198,6 +239,8 @@ def main():
         payload = {k: v for k, v in results.items()}
         pp = gt["p"]
         payload["_meta"] = dict(p_mean=float(pp.mean()), p_spread=float(pp.std()),
+                                logit_sat_mean=float(sat.mean()), logit_sat_spread=float(sat.std()),
+                                corr_Glogit_Gsampled=corr,
                                 # p=0 or p=1 means every advantage in that group is
                                 # zero under mean-centring, so the prompt contributes
                                 # nothing no matter how it is allocated.

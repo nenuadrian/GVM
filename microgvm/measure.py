@@ -98,3 +98,53 @@ def estimator_error(est_grad, true_grad):
                 rel=float((d.norm() / true_grad.norm().clamp(min=1e-12)).item()),
                 cos=float(torch.nn.functional.cosine_similarity(
                     est_grad[None], true_grad[None]).item()))
+
+
+def logit_grad_scale(model, task, idx, n_rollouts, temperature=1.0, generator=None,
+                     accepted_only=True):
+    """G_i from the forward pass alone, via the Fisher identity.
+
+    For a categorical over logits z with probabilities q,
+
+        d log q_a / d z_b = delta_ab - q_b   =>   grad = e_a - q
+        E_{a~q} ||grad||^2 = 1 - ||q||^2
+
+    so the expected squared gradient norm at the logit layer is one minus the
+    collision probability, available from the forward pass with NO backward pass
+    and no sampling of the gradient. Summed over response positions this is a
+    per-sequence scale; GVM's G_i is a norm, so the sqrt is taken.
+
+    This is the exact second moment, where GVM estimates a MEAN of norms from N'
+    samples -- which is also the wrong moment (Section 3.1 defines G_i^2 as an
+    expected square, Algorithm 2 averages norms). That Jensen gap disappears here.
+
+    Two honest differences from GVM's G_i:
+      - logit space, not parameter space. GVM already approximates by using only
+        embed_tokens, so this is a question of which approximation is better.
+      - the expectation is over the model's own distribution at each position,
+        whereas GVM averages over ACCEPTED rollouts. accepted_only=True restricts
+        the outer average to accepted sequences to stay comparable.
+
+    Returns (G_logit, rewards, saturation) where saturation is the mean collision
+    probability: if it is near 0 the quantity pins at 1 for every prompt and
+    cannot discriminate, which is the main way this idea could fail.
+    """
+    import torch.nn.functional as F
+    x, _ = task.batch([idx])
+    k = len(task.targets[idx])
+    prompt = torch.tensor(x).repeat(n_rollouts, 1)
+    comp = model.sample(prompt, n_new=k, temperature=temperature, generator=generator)
+    rewards = task.reward([idx] * n_rollouts, comp.numpy())
+
+    with torch.no_grad():
+        seq = torch.cat([prompt, comp], dim=1)
+        logits = model(seq[:, :-1])[:, -k:, :]
+        q = F.softmax(logits, dim=-1)
+        collision = q.pow(2).sum(-1)                  # (n, k)
+        per_seq = (1.0 - collision).sum(-1)           # (n,) = E||grad_z log p||^2
+
+    mask = rewards > 0 if accepted_only else np.ones(n_rollouts, dtype=bool)
+    if not mask.any():
+        return 0.0, rewards, float(collision.mean().item())
+    G = float(per_seq[torch.tensor(mask)].sqrt().mean().item())
+    return G, rewards, float(collision.mean().item())
