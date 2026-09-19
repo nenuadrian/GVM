@@ -135,6 +135,3 @@ logs
 log
 outputs
 
-# microgvm experiment outputs
-microgvm/results/
-microgvm/results_csf3/
