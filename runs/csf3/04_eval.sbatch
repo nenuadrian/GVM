@@ -28,7 +28,9 @@ cd "$GVM_ROOT"
 gvm_activate
 
 if [[ -n "${GVM_METHOD:-}" ]]; then
-    run_name="${GVM_METHOD}-qwen15"
+    # Must match 03_train_gvm.sbatch, which appends GVM_RUN_SUFFIX. Without it an
+    # ablation arm's eval silently resolves to the base arm's checkpoint tree.
+    run_name="${GVM_METHOD}-qwen15${GVM_RUN_SUFFIX:-}"
     case "$GVM_METHOD" in
         grpo|raftpp)
             # Baselines keep one checkpoint tree; take the highest global_step_N.
