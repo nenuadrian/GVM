@@ -187,6 +187,59 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def build_pilot_rows(batch, prompt_rows, pilot_token_lists, tokenizer, response_length, pad_id):
+    """Build DataProto rows whose responses are the already-drawn pilot rollouts.
+
+    GVM spends N' rollouts per prompt measuring p_i and G_i and then throws them
+    away, drawing the training rollouts fresh -- so an iteration costs N' * m more
+    samples than its budget N admits. The authors wrote the reuse (see
+    em/stage_2_sample.py, which generates only n_i - N' new samples) but never
+    wired it up.
+
+    The pilots came from the policy at the START of the iteration, so they are
+    exactly on-policy for the first M-step and up to k-1 gradient steps stale by
+    the k-th. That is the same staleness the method already accepts by taking
+    multiple gradient steps per rollout batch, and which RAFT++/GRPO's importance
+    ratio and clipping exist to absorb.
+
+    `prompt_rows` maps each row index in `batch` to the prompt whose pilots should
+    be attached, so every field except the response is copied from a real row and
+    stays consistent (index, uid, reward_model, raw prompts).
+    """
+    import torch
+    from verl.utils.torch_functional import get_response_mask
+
+    if not prompt_rows:
+        return None
+    rows, resp = [], []
+    for row_idx, toks in zip(prompt_rows, pilot_token_lists):
+        ids = list(toks[:response_length])
+        ids = ids + [pad_id] * (response_length - len(ids))
+        rows.append(row_idx)
+        resp.append(ids)
+
+    src = batch[torch.tensor(rows, dtype=torch.long)]
+    response = torch.tensor(resp, dtype=torch.long, device=src.batch["responses"].device)
+    prompts = src.batch["prompts"]
+    seq = torch.cat([prompts, response], dim=-1)
+
+    prompt_mask = src.batch["attention_mask"][:, : prompts.shape[1]]
+    resp_mask = get_response_mask(response_id=response, eos_token=pad_id, dtype=prompt_mask.dtype)
+    attention_mask = torch.cat([prompt_mask, resp_mask], dim=-1)
+
+    # Continue the prompt's position ids across the response, as the rollout does.
+    last_pos = src.batch["position_ids"][:, : prompts.shape[1]][:, -1:]
+    delta = torch.arange(1, response_length + 1, device=response.device).unsqueeze(0)
+    position_ids = torch.cat([src.batch["position_ids"][:, : prompts.shape[1]],
+                              last_pos + delta], dim=-1)
+
+    src.batch["responses"] = response
+    src.batch["input_ids"] = seq
+    src.batch["attention_mask"] = attention_mask
+    src.batch["position_ids"] = position_ids
+    return src
+
+
 def compute_gvm_reweight(data: DataProto, mode="auto", adv_estimator=None):
     """Per-prompt weights restoring GVM's intended estimator.
 
@@ -999,6 +1052,24 @@ class RayPPOTrainer:
             with open(self.config.actor_rollout_ref.rollout.sample_sizes_data, 'r') as f:
                 sample_sizes = json.load(f)
 
+        # Optional: reuse the E-step's pilot rollouts as training data instead of
+        # discarding them, which is what halves GVM's effective sampling cost.
+        pilot_texts = None
+        pilot_glob = self.config.actor_rollout_ref.rollout.get('pilot_data_glob', None)
+        if use_em and pilot_glob:
+            import glob as _glob
+            pilot_texts = {}
+            offset = 0
+            for path in sorted(_glob.glob(pilot_glob)):
+                with open(path) as f:
+                    shard = json.load(f)
+                for j, rec in enumerate(shard):
+                    outs = rec.get('outputs', [])
+                    if outs:
+                        pilot_texts[offset + j] = outs
+                offset += len(shard)
+            print(f"pilot reuse: loaded rollouts for {len(pilot_texts)} prompts from {pilot_glob}")
+
         # load checkpoint before doing anything
         self._load_checkpoint()
 
@@ -1060,14 +1131,38 @@ class RayPPOTrainer:
                         return sample_size
                     
                     sample_size = [sample_sizes[idx] for idx in batch_dict['index']]
+
+                    # Spend part of each prompt's budget on pilots already drawn
+                    # rather than discarding them. r_i = min(n_i, pilots available):
+                    # capping at n_i matters because em/stage_2_sample.py's version
+                    # computes range(n_i - N'), which is empty when n_i < N', and
+                    # then folds in all N' pilots anyway -- overshooting the budget
+                    # exactly on the prompts GVM decided to under-sample.
+                    pilot_reuse = [0] * len(sample_size)
+                    if pilot_texts is not None:
+                        for j, idx in enumerate(batch_dict['index']):
+                            avail = len(pilot_texts.get(int(idx), ()))
+                            r = min(sample_size[j], avail)
+                            pilot_reuse[j] = r
+                            sample_size[j] -= r
                     # print(f'sum(sample_size): {sum(sample_size)}, {sum(sample_size) % self.config.trainer.n_gpus_per_node}')
                     
-                    if sum(sample_size) == 0:
+                    if sum(sample_size) + sum(pilot_reuse) == 0:
                         # skip empty batch
                         continue
-                    sample_size = align_chunk(sample_size)
+                    # Align on the TOTAL, since the reused pilots are concatenated
+                    # after generation and the per-rank chunking sees both.
+                    if sum(sample_size) > 0:
+                        deficit = (-(sum(sample_size) + sum(pilot_reuse))) % self.config.trainer.n_gpus_per_node
+                        if deficit:
+                            order = np.argsort(sample_size)[::-1]
+                            for t in range(deficit):
+                                sample_size[order[t % len(order)]] += 1
+                    else:
+                        sample_size = align_chunk(sample_size)
                     # print(f'aligned sample_size: {sum(sample_size)}')
 
+                    batch_dict_index_order = list(batch_dict['index'])
                     for k, v in batch_dict.items():
                         new_batch_dict[k] = my_repeat(v, sample_size)
 
@@ -1119,6 +1214,30 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+
+                    if pilot_texts is not None and sum(pilot_reuse) > 0:
+                        # One representative row per prompt to copy metadata from.
+                        first_row = {}
+                        for r, cur in enumerate(batch.non_tensor_batch['index']):
+                            first_row.setdefault(int(cur), r)
+                        rows, toks = [], []
+                        for j, idx in enumerate(batch_dict_index_order):
+                            idx = int(idx)
+                            if pilot_reuse[j] <= 0 or idx not in first_row:
+                                continue
+                            for text in pilot_texts[idx][: pilot_reuse[j]]:
+                                rows.append(first_row[idx])
+                                toks.append(self.tokenizer(text, add_special_tokens=False)['input_ids'])
+                        extra = build_pilot_rows(
+                            batch, rows, toks, self.tokenizer,
+                            self.config.data.max_response_length,
+                            self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None
+                            else self.tokenizer.eos_token_id,
+                        )
+                        if extra is not None:
+                            batch = DataProto.concat([batch, extra])
+                            metrics['em/pilot_rollouts_reused'] = float(len(rows))
+                            metrics['em/fresh_rollouts'] = float(sum(sample_size))
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # balance the number of valid tokens on each dp rank.

@@ -159,6 +159,16 @@ print(sum(len(json.load(open(f'{d}/accept_rates_{k}.json'))) for k in range(w)))
 
     [[ -f "$sizes_json" ]] || { echo "budget file not produced: $sizes_json" >&2; exit 4; }
 
+    # GVM_REUSE_PILOTS=1 feeds the E-step's own rollouts back in as training data
+    # instead of discarding them, which is what removes the method's ~2x sampling
+    # overhead. Files are read in sorted order and indexed by cumulative offset,
+    # matching how stage_2_calc_sample_size.py reconstructs the shard.
+    pilot_glob=""
+    if [[ "${GVM_REUSE_PILOTS:-0}" == "1" ]]; then
+        pilot_glob="$em_dir/stage_1_collected_data_all_*.json"
+        echo "--- pilot reuse ON: $pilot_glob ---"
+    fi
+
     # Log this E-step's allocation to the same wandb run as the M-steps.
     VERL_LOG_STEP_OFFSET=$(( (i - 1) * steps_per_iter )) \
         python runs/csf3/log_estep.py --iter "$i" --em_dir "$em_dir" \
@@ -205,6 +215,7 @@ print(sum(len(json.load(open(f'{d}/accept_rates_{k}.json'))) for k in range(w)))
         actor_rollout_ref.rollout.n="$rollout_n" \
         +actor_rollout_ref.rollout.use_em=True \
         +actor_rollout_ref.rollout.sample_sizes_data="$sizes_json" \
+        +actor_rollout_ref.rollout.pilot_data_glob="$pilot_glob" \
         actor_rollout_ref.rollout.val_kwargs.n="$GVM_VAL_N" \
         actor_rollout_ref.rollout.val_kwargs.temperature="$GVM_VAL_TEMP" \
         actor_rollout_ref.rollout.val_kwargs.do_sample=True \

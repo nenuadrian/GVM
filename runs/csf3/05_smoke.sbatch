@@ -156,6 +156,7 @@ guard "$T_TRAIN" python3 -m verl.trainer.main_ppo "${common[@]}" \
     actor_rollout_ref.rollout.n=1 \
     +actor_rollout_ref.rollout.use_em=True \
     +actor_rollout_ref.rollout.sample_sizes_data="$sizes_json" \
+    +actor_rollout_ref.rollout.pilot_data_glob="$em_dir/stage_1_collected_data_all_*.json" \
     trainer.experiment_name=smoke-gvm-raftpp \
     trainer.default_local_dir="$GVM_ROOT/checkpoints/smoke/gvm-raftpp" \
     2>&1 | tee "logs/smoke-gvm-raftpp.log"
