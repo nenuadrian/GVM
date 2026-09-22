@@ -1,14 +1,16 @@
 set -x
 
-export VLLM_ATTENTION_BACKEND=XFORMERS
-data=numina_math
+# verl syncs weights via vLLM V0 engine internals; vLLM 0.9.x defaults to V1, so pin V0.
+export VLLM_USE_V1=0
+# Do NOT force XFORMERS: that build has no sm_120 (Blackwell) kernels. vLLM auto-selects FlashAttention.
+data=numina_math_15_all
 project_name=em-raft
 algorithm=grpo
 model=Qwen2.5-Math-1.5B
 model_name_or_path=Qwen/Qwen2.5-Math-1.5B
 n=8
 experiment_name=${model}-${algorithm}-${data}-n${n}
-GPUS=(1 2 3 4 5 6 7 8)
+GPUS=(${GPUS:-$(seq 0 $(( $(nvidia-smi -L | wc -l) - 1 )))})
 my_world_size=${#GPUS[@]}
 
 math_train_path=./data/$data/train.parquet
@@ -23,7 +25,7 @@ CUDA_VISIBLE_DEVICES=$(IFS=,; echo "${GPUS[*]}") python3 -m verl.trainer.main_pp
     algorithm.adv_estimator=$algorithm \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
-    data.train_batch_size=1024 \
+    data.train_batch_size=${TRAIN_BS:-1024} \
     data.max_prompt_length=1024 \
     data.max_response_length=3072 \
     data.filter_overlong_prompts=True \
@@ -31,7 +33,7 @@ CUDA_VISIBLE_DEVICES=$(IFS=,; echo "${GPUS[*]}") python3 -m verl.trainer.main_pp
     actor_rollout_ref.model.path=$model_name_or_path \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=256 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=${MINI_BS:-256} \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
