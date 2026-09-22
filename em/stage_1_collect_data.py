@@ -156,7 +156,7 @@ start_time = time.time()
 stage_1_outputs = stage_1_sampling()
 end_time = time.time()
 print(f'Stage 1 sampling time: {end_time - start_time} seconds')
-with open(f'/home/ubuntu/projects/gvm/GVM/em/stage_1_sampling_time.txt', 'a') as f:
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stage_1_sampling_time.txt'), 'a') as f:
     f.write(f'Model prefix: {script_args.model_prefix}\n')
     f.write(f'Suffix: {script_args.suffix}\n')
     f.write(f'Iter: {script_args.iter}\n')

@@ -16,6 +16,7 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import os
 from enum import Enum
 from functools import partial
 from pathlib import Path
@@ -109,6 +110,10 @@ class Tracking:
             self.logger["console"] = self.console_logger
 
     def log(self, data, step, backend=None):
+        # GVM replication: the EM pipeline restarts verl once per iteration, so
+        # global_steps resets to 1 each time. VERL_LOG_STEP_OFFSET shifts the
+        # logged step onto a single continuous axis across iterations.
+        step = step + int(os.environ.get("VERL_LOG_STEP_OFFSET", 0))
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)

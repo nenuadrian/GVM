@@ -258,7 +258,7 @@ with open(f'data/{script_args.model_prefix}/{script_args.suffix}/data_{script_ar
     json.dump(all_grads, f, indent=4)
 end_time = time.time()
 print(f'Stage 2 time: {end_time - start_time} seconds')
-with open(f'/home/ubuntu/projects/gvm/GVM/em/stage_2_time.txt', 'a') as f:
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stage_2_time.txt'), 'a') as f:
     f.write(f'Model prefix: {script_args.model_prefix}\n')
     f.write(f'Suffix: {script_args.suffix}\n')
     f.write(f'Iter: {script_args.iter}\n')

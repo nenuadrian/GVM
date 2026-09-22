@@ -187,6 +187,125 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
+def build_pilot_rows(batch, prompt_rows, pilot_token_lists, tokenizer, response_length, pad_id):
+    """Build DataProto rows whose responses are the already-drawn pilot rollouts.
+
+    GVM spends N' rollouts per prompt measuring p_i and G_i and then throws them
+    away, drawing the training rollouts fresh -- so an iteration costs N' * m more
+    samples than its budget N admits. The authors wrote the reuse (see
+    em/stage_2_sample.py, which generates only n_i - N' new samples) but never
+    wired it up.
+
+    The pilots came from the policy at the START of the iteration, so they are
+    exactly on-policy for the first M-step and up to k-1 gradient steps stale by
+    the k-th. That is the same staleness the method already accepts by taking
+    multiple gradient steps per rollout batch, and which RAFT++/GRPO's importance
+    ratio and clipping exist to absorb.
+
+    `prompt_rows` maps each row index in `batch` to the prompt whose pilots should
+    be attached, so every field except the response is copied from a real row and
+    stays consistent (index, uid, reward_model, raw prompts).
+    """
+    import torch
+    from verl.utils.torch_functional import get_response_mask
+
+    if not prompt_rows:
+        return None
+    rows, resp = [], []
+    for row_idx, toks in zip(prompt_rows, pilot_token_lists):
+        ids = list(toks[:response_length])
+        ids = ids + [pad_id] * (response_length - len(ids))
+        rows.append(row_idx)
+        resp.append(ids)
+
+    src = batch[torch.tensor(rows, dtype=torch.long)]
+    response = torch.tensor(resp, dtype=torch.long, device=src.batch["responses"].device)
+    prompts = src.batch["prompts"]
+    seq = torch.cat([prompts, response], dim=-1)
+
+    prompt_mask = src.batch["attention_mask"][:, : prompts.shape[1]]
+    resp_mask = get_response_mask(response_id=response, eos_token=pad_id, dtype=prompt_mask.dtype)
+    attention_mask = torch.cat([prompt_mask, resp_mask], dim=-1)
+
+    # Continue the prompt's position ids across the response, as the rollout does.
+    last_pos = src.batch["position_ids"][:, : prompts.shape[1]][:, -1:]
+    delta = torch.arange(1, response_length + 1, device=response.device).unsqueeze(0)
+    position_ids = torch.cat([src.batch["position_ids"][:, : prompts.shape[1]],
+                              last_pos + delta], dim=-1)
+
+    src.batch["responses"] = response
+    src.batch["input_ids"] = seq
+    src.batch["attention_mask"] = attention_mask
+    src.batch["position_ids"] = position_ids
+    return src
+
+
+def compute_gvm_reweight(data: DataProto, mode="auto", adv_estimator=None):
+    """Per-prompt weights restoring GVM's intended estimator.
+
+    GVM Lemma 1 / Algorithm 1 line 8 weight each prompt so it contributes one
+    unit regardless of how large a rollout budget it received. verl instead
+    aggregates with loss_agg_mode=token-mean, under which a prompt's weight grows
+    with n_i and with its response lengths -- exactly the prompts GVM oversamples.
+
+    Which weight restores "one unit per prompt" depends on the advantage:
+
+      inv_np  w = 1/(n_i p_i).  For RAFT, rejected rollouts carry advantage 0 and
+              contribute nothing, so the sum runs over the ~n_i p_i accepted ones
+              and the total is 1. This is Lemma 1 verbatim.
+      inv_n   w = 1/n_i.  For GRPO the advantages are mean-centred, so every
+              rollout contributes; dividing by the group size is what makes each
+              prompt count once. Using inv_np here would leave a residual 1/p_i
+              tilt toward hard prompts -- part of the very effect we are testing.
+
+      auto    inv_np for raft, inv_n for grpo.
+
+    Weights are rescaled to preserve the token-weighted total, so switching this
+    on does not also change the effective learning rate.
+    """
+    if mode == "auto":
+        mode = "inv_np" if str(adv_estimator) == "raft" else "inv_n"
+    assert mode in ("inv_np", "inv_n"), f"unknown gvm_reweight mode {mode}"
+
+    uid = data.non_tensor_batch["uid"]
+    scores = data.batch["token_level_scores"].sum(dim=-1)
+    tokens = data.batch["response_mask"].sum(dim=-1).to(scores.dtype)
+
+    groups = defaultdict(list)
+    for row, key in enumerate(uid):
+        groups[key].append(row)
+
+    w = torch.ones_like(scores)
+    degenerate = 0
+    for rows in groups.values():
+        idx = torch.tensor(rows, device=scores.device, dtype=torch.long)
+        n_i = float(len(rows))
+        if mode == "inv_n":
+            w[idx] = 1.0 / n_i
+            continue
+        p_i = float(scores[idx].gt(0).to(scores.dtype).mean().item())
+        if p_i <= 0.0:
+            # No accepted rollout: the group's advantages are all zero anyway, so
+            # leave the weight at 1 instead of dividing by zero.
+            degenerate += 1
+            continue
+        w[idx] = 1.0 / (n_i * p_i)
+
+    mass = (w * tokens).sum()
+    if mass > 0:
+        w = w * (tokens.sum() / mass)
+
+    metrics = {
+        "gvm_reweight/mode_inv_np": float(mode == "inv_np"),
+        "gvm_reweight/weight_min": w.min().item(),
+        "gvm_reweight/weight_max": w.max().item(),
+        "gvm_reweight/weight_ratio_max_min": (w.max() / w.min().clamp(min=1e-12)).item(),
+        "gvm_reweight/groups": float(len(groups)),
+        "gvm_reweight/groups_degenerate": float(degenerate),
+    }
+    return w.unsqueeze(-1), metrics
+
+
 def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, norm_adv_by_std_in_grpo=True):
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch:
@@ -933,6 +1052,24 @@ class RayPPOTrainer:
             with open(self.config.actor_rollout_ref.rollout.sample_sizes_data, 'r') as f:
                 sample_sizes = json.load(f)
 
+        # Optional: reuse the E-step's pilot rollouts as training data instead of
+        # discarding them, which is what halves GVM's effective sampling cost.
+        pilot_texts = None
+        pilot_glob = self.config.actor_rollout_ref.rollout.get('pilot_data_glob', None)
+        if use_em and pilot_glob:
+            import glob as _glob
+            pilot_texts = {}
+            offset = 0
+            for path in sorted(_glob.glob(pilot_glob)):
+                with open(path) as f:
+                    shard = json.load(f)
+                for j, rec in enumerate(shard):
+                    outs = rec.get('outputs', [])
+                    if outs:
+                        pilot_texts[offset + j] = outs
+                offset += len(shard)
+            print(f"pilot reuse: loaded rollouts for {len(pilot_texts)} prompts from {pilot_glob}")
+
         # load checkpoint before doing anything
         self._load_checkpoint()
 
@@ -994,14 +1131,38 @@ class RayPPOTrainer:
                         return sample_size
                     
                     sample_size = [sample_sizes[idx] for idx in batch_dict['index']]
+
+                    # Spend part of each prompt's budget on pilots already drawn
+                    # rather than discarding them. r_i = min(n_i, pilots available):
+                    # capping at n_i matters because em/stage_2_sample.py's version
+                    # computes range(n_i - N'), which is empty when n_i < N', and
+                    # then folds in all N' pilots anyway -- overshooting the budget
+                    # exactly on the prompts GVM decided to under-sample.
+                    pilot_reuse = [0] * len(sample_size)
+                    if pilot_texts is not None:
+                        for j, idx in enumerate(batch_dict['index']):
+                            avail = len(pilot_texts.get(int(idx), ()))
+                            r = min(sample_size[j], avail)
+                            pilot_reuse[j] = r
+                            sample_size[j] -= r
                     # print(f'sum(sample_size): {sum(sample_size)}, {sum(sample_size) % self.config.trainer.n_gpus_per_node}')
                     
-                    if sum(sample_size) == 0:
+                    if sum(sample_size) + sum(pilot_reuse) == 0:
                         # skip empty batch
                         continue
-                    sample_size = align_chunk(sample_size)
+                    # Align on the TOTAL, since the reused pilots are concatenated
+                    # after generation and the per-rank chunking sees both.
+                    if sum(sample_size) > 0:
+                        deficit = (-(sum(sample_size) + sum(pilot_reuse))) % self.config.trainer.n_gpus_per_node
+                        if deficit:
+                            order = np.argsort(sample_size)[::-1]
+                            for t in range(deficit):
+                                sample_size[order[t % len(order)]] += 1
+                    else:
+                        sample_size = align_chunk(sample_size)
                     # print(f'aligned sample_size: {sum(sample_size)}')
 
+                    batch_dict_index_order = list(batch_dict['index'])
                     for k, v in batch_dict.items():
                         new_batch_dict[k] = my_repeat(v, sample_size)
 
@@ -1053,6 +1214,30 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+
+                    if pilot_texts is not None and sum(pilot_reuse) > 0:
+                        # One representative row per prompt to copy metadata from.
+                        first_row = {}
+                        for r, cur in enumerate(batch.non_tensor_batch['index']):
+                            first_row.setdefault(int(cur), r)
+                        rows, toks = [], []
+                        for j, idx in enumerate(batch_dict_index_order):
+                            idx = int(idx)
+                            if pilot_reuse[j] <= 0 or idx not in first_row:
+                                continue
+                            for text in pilot_texts[idx][: pilot_reuse[j]]:
+                                rows.append(first_row[idx])
+                                toks.append(self.tokenizer(text, add_special_tokens=False)['input_ids'])
+                        extra = build_pilot_rows(
+                            batch, rows, toks, self.tokenizer,
+                            self.config.data.max_response_length,
+                            self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None
+                            else self.tokenizer.eos_token_id,
+                        )
+                        if extra is not None:
+                            batch = DataProto.concat([batch, extra])
+                            metrics['em/pilot_rollouts_reused'] = float(len(rows))
+                            metrics['em/fresh_rollouts'] = float(sum(sample_size))
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
                     # balance the number of valid tokens on each dp rank.
@@ -1133,6 +1318,24 @@ class RayPPOTrainer:
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                         )
+
+                        # GVM Lemma 1 / Algorithm 1 line 8 weight the gradient by
+                        # 1/(n_i p_i), which makes every prompt count equally and
+                        # is what makes the estimator unbiased. verl instead
+                        # aggregates with loss_agg_mode=token-mean, so a prompt's
+                        # weight grows with n_i and with its response lengths --
+                        # precisely the prompts GVM oversamples. The actor only
+                        # ever receives `advantages` (see dp_actor select_keys),
+                        # so that is the only channel the weight can travel; apply
+                        # it here, in the driver, where the group ids still exist.
+                        gvm_rw = str(self.config.algorithm.get("gvm_reweight", "off"))
+                        if gvm_rw not in ("off", "False", "false", "None"):
+                            adv_w, w_metrics = compute_gvm_reweight(
+                                batch, mode=gvm_rw,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                            )
+                            batch.batch["advantages"] = batch.batch["advantages"] * adv_w
+                            metrics.update(w_metrics)
 
                     # update critic
                     if self.use_critic:
