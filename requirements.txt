@@ -198,7 +198,6 @@ urllib3==2.5.0
 uv==0.8.3
 uvicorn==0.35.0
 uvloop==0.21.0
--e file:///home/ubuntu/projects/gvm/GVM
 virtualenv==20.32.0
 vllm==0.8.3
 wandb==0.21.0
