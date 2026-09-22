@@ -21,6 +21,22 @@ import torch
 from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
 
 
+def load_tokenizer(path):
+    """Fast first, which is what raft_align.py does, so eval tokenizes exactly
+    as training did. Falls back to the sentencepiece tokenizer for repos that
+    ship no tokenizer.json and cannot be converted."""
+    try:
+        tok = AutoTokenizer.from_pretrained(path)
+    except Exception as e:
+        print(f"fast tokenizer unavailable for {path} ({e}); using slow")
+        tok = AutoTokenizer.from_pretrained(path, use_fast=False)
+    tok.pad_token = tok.eos_token
+    tok.pad_token_id = tok.eos_token_id
+    tok.padding_side = "left"  # decoder-only generation, and the reward model's
+    # sequence head reads position -1, which left padding lands on correctly
+    return tok
+
+
 def clean_text(text):
     """Verbatim RaftAligner._clean_text: keep only the first assistant turn."""
     if len(text) == 0:
@@ -50,10 +66,7 @@ def main():
 
     prompts = [i["text"] for i in json.load(open(args.prompts))["instances"]]
 
-    tok = AutoTokenizer.from_pretrained(args.model, use_fast=False)
-    tok.pad_token = tok.eos_token
-    tok.pad_token_id = tok.eos_token_id
-    tok.padding_side = "left"  # decoder-only batch generation
+    tok = load_tokenizer(args.model)
 
     # The aligner drops prompts over 256 tokens ("a long context window will lead
     # to a heavy burden on the GPU memory"); hold the eval set to the same rule.
@@ -64,10 +77,7 @@ def main():
         args.model, torch_dtype=torch.bfloat16
     ).to(dev).eval()
 
-    rm_tok = AutoTokenizer.from_pretrained(args.reward_model, use_fast=False)
-    rm_tok.pad_token = rm_tok.eos_token
-    rm_tok.pad_token_id = rm_tok.eos_token_id
-    rm_tok.padding_side = "left"
+    rm_tok = load_tokenizer(args.reward_model)
     rm = AutoModelForSequenceClassification.from_pretrained(
         args.reward_model, torch_dtype=torch.bfloat16, num_labels=1
     ).to(dev).eval()

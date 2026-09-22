@@ -24,6 +24,11 @@ export PIP_CACHE_DIR="$HOME/scratch/.cache/pip"
 export TRITON_CACHE_DIR="$HOME/scratch/.cache/triton"
 mkdir -p "$HF_HOME" "$PIP_CACHE_DIR" "$TRITON_CACHE_DIR" "$RAFT_OUT"
 
+# ~/.local/lib/python3.10/site-packages is on sys.path even inside a conda env
+# and holds unrelated projects' packages (including a torch). This stack is
+# pinned tightly enough that one shadowed import would be hard to diagnose.
+export PYTHONNOUSERSITE=1
+
 export TOKENIZERS_PARALLELISM=false
 # Without this, python buffers stdout when piped into tee, so a hang looks
 # identical to a silent process and you learn nothing from the log.

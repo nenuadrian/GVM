@@ -82,6 +82,7 @@ esac
     --num_train_epochs "$RAFT_EPOCHS" \
     --per_device_train_batch_size "$RAFT_TRAIN_BS" \
     --per_device_eval_batch_size 1 \
+    --block_size "$RAFT_BLOCK" \
     --bf16 \
     "${ds[@]}" \
     --output_dir "$raft_dir" --overwrite_output_dir \

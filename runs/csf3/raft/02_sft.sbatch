@@ -75,6 +75,7 @@ import os, torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 d = os.environ["RAFT_OUT"] + "/sft/" + "$slug"
 tok = AutoTokenizer.from_pretrained(d)
+print("tokenizer:", type(tok).__name__, "vocab", len(tok))
 m = AutoModelForCausalLM.from_pretrained(d, torch_dtype=torch.bfloat16)
 print("SFT model loads:", type(m).__name__, sum(p.numel() for p in m.parameters())/1e9, "B params")
 PY

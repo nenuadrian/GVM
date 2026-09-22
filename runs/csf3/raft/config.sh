@@ -35,12 +35,21 @@ export RAFT_TOP_PCT="${RAFT_TOP_PCT:-0.125}"
 # choice here, because HH-RLHF rewards are dominated by the prompt. "top" ranks
 # globally across prompts, which the paper shows is more reward-efficient but
 # degenerates when the prompt drives the reward.
+#
+# Only "local" actually runs. raft_aligner.align() does an unconditional
+# `print(M, K)` while K is bound only inside the `local` branch, so "top" dies
+# with NameError before the first iteration. Fixing that is a separate job.
 export RAFT_COLLECTION="${RAFT_COLLECTION:-local}"
 export RAFT_LR="${RAFT_LR:-2e-5}"
 export RAFT_EPOCHS="${RAFT_EPOCHS:-4}"
 export RAFT_TRAIN_BS="${RAFT_TRAIN_BS:-1}"
 export RAFT_MIN_NEW="${RAFT_MIN_NEW:-96}"
 export RAFT_MAX_NEW="${RAFT_MAX_NEW:-128}"
+# The selected best-of-K texts are concatenated and re-chunked into blocks of
+# this size before the SFT step. Left implicit, raft_aligner derives it from
+# tokenizer.model_max_length and lands on 512 for any model with a window above
+# 1024 -- so this only makes the existing behaviour explicit and model-independent.
+export RAFT_BLOCK="${RAFT_BLOCK:-512}"
 
 # --- evaluation ------------------------------------------------------------
 # The paper's headline number for this experiment is mean reward on held-out

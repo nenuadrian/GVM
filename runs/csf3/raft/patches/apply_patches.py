@@ -18,6 +18,8 @@ Four changes, none of which touch the RAFT algorithm:
    2048-token window.
 4. raft_align.py tolerates local_rank == -1, so the pipeline can be run on one
    GPU without a distributed launcher.
+5. raft_aligner.py writes the final model from rank 0 only. Upstream calls
+   wrapped_model.save() on every rank against one directory.
 """
 
 import sys
@@ -120,7 +122,11 @@ def main(root: Path):
             "                    'raft/mean_reward': self.reward_seq[-1],\n"
             "                    'raft/mean_reward_selected': self.train_reawrd[-1],\n"
             "                    'raft/reward_gain': self.train_reawrd[-1] - self.reward_seq[-1],\n"
-            "                    'raft/n_selected': len(raft_trainer.train_dataset),\n"
+            "                    # selected_dataset holds the best-of-K winners; the\n"
+            "                    # trainer's dataset is those texts concatenated and\n"
+            "                    # re-chunked into block_size blocks, so they differ.\n"
+            "                    'raft/n_selected': len(selected_dataset['train']),\n"
+            "                    'raft/train_blocks': len(raft_trainer.train_dataset),\n"
             "                    'raft/prompts_seen': (iteration + 1) * M * world_size,\n"
             "                    'raft/samples_drawn': (iteration + 1) * M * world_size *\n"
             "                                         (K if collection_strategy == 'local' else 1),\n"
@@ -137,7 +143,7 @@ def main(root: Path):
     # --- 4. reward pipeline: bf16, batched, truncating, rank-safe ---------
     edit(
         align_ex,
-        anchor="from transformers import AutoTokenizer, HfArgumentParser, pipeline\n",
+        anchor="from transformers import HfArgumentParser, pipeline, AutoTokenizer\n",
         addition="import torch  # [csf3]\n",
         marker="import torch  # [csf3]",
     )
@@ -172,6 +178,31 @@ def main(root: Path):
         text = text.replace(old_pipe, new_pipe)
         align_ex.write_text(text)
         print("  [ok]   raft_align.py: reward pipeline (bf16, rank-safe)")
+
+    # --- 5. the final save is unguarded: every rank writes the same files ---
+    # transformers 4.34's save_pretrained torch.saves straight to the target
+    # path, so four ranks racing on one directory can leave a truncated
+    # pytorch_model.bin. Rank 0 writes; the others wait at a barrier.
+    text = aligner.read_text()
+    old_save = (
+        "        if aligner_args.output_dir is not None:\n"
+        "            wrapped_model.save(aligner_args.output_dir)\n"
+    )
+    new_save = (
+        "        if aligner_args.output_dir is not None:\n"
+        "            # [csf3] rank 0 writes, everyone else waits.\n"
+        "            if training_args.local_rank in (-1, 0):\n"
+        "                wrapped_model.save(aligner_args.output_dir)\n"
+        "            if dist.is_available() and dist.is_initialized():\n"
+        "                dist.barrier()\n"
+    )
+    if "[csf3] rank 0 writes, everyone else waits" in text:
+        print("  [skip] raft_aligner.py: already has guarded save")
+    elif old_save not in text:
+        sys.exit(f"ERROR: final-save anchor not found in {aligner}")
+    else:
+        aligner.write_text(text.replace(old_save, new_save))
+        print("  [ok]   raft_aligner.py: final save guarded to rank 0")
 
     text = align_ex.read_text()
     old_kw = (
